@@ -1,17 +1,4 @@
-/.bundle/
-/.yardoc
-/_yardoc/
-/coverage/
-/doc/
-/pkg/
-/spec/reports/
-/tmp/
-/vendor/bundle/
-
-# rspec failure tracking
-.rspec_status
-
-# Test files
-.env
+.DS_Store
 *.gem
-Gemfile.lock
+vendor/
+.bundle/
