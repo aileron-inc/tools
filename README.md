@@ -1,13 +1,15 @@
 # kc - Keychain Manager for direnv
 
-A CLI tool to securely store and retrieve `.env` files from macOS Keychain, designed to work seamlessly with direnv.
+A CLI tool to securely store and retrieve secrets from macOS Keychain with namespace support, designed to work seamlessly with direnv.
 
 ## Features
 
-- 🔐 Securely store `.env` files in macOS Keychain
+- 🔐 Securely store any secrets in macOS Keychain
+- 🏷️ **Namespace support** - organize secrets by type (env, ssh, token, etc.)
 - 🚀 Native implementation using FFI (no shell command overhead)
 - 🎯 Designed for direnv integration
 - 📦 Simple CLI interface
+- 📋 List and filter secrets by namespace
 
 ## Installation
 
@@ -23,14 +25,30 @@ gem 'kc'
 
 ## Usage
 
+All commands require a **namespace** in the format `<namespace>:<name>`. Namespaces help organize different types of secrets.
+
 ### Save to Keychain
 
-Read from stdin and save to keychain:
+Read from stdin and save to keychain with namespace:
 
 ```bash
-kc save 'myproject' < .env
-cat .env | kc save 'myproject'
-echo "API_KEY=secret" | kc save 'myproject'
+# Environment variables
+kc save env:myproject < .env
+cat .env | kc save env:production
+
+# SSH keys
+kc save ssh:id_rsa < ~/.ssh/id_rsa
+kc save ssh:deploy-key < deploy_key
+
+# API tokens
+echo "ghp_xxxxxxxxxxxx" | kc save token:github
+kc save token:openai < api_token.txt
+
+# Certificates
+kc save cert:ssl-cert < certificate.pem
+
+# Custom namespaces
+kc save my-app:config < config.json
 ```
 
 ### Load from Keychain
@@ -38,14 +56,29 @@ echo "API_KEY=secret" | kc save 'myproject'
 Output to stdout or redirect to file:
 
 ```bash
-kc load 'myproject'
-kc load 'myproject' > .env
+kc load env:myproject
+kc load env:myproject > .env
+kc load ssh:id_rsa > ~/.ssh/id_rsa
+```
+
+### List Entries
+
+```bash
+# List all entries
+kc list
+
+# List entries in specific namespace
+kc list env:
+kc list ssh:
+kc list token:
 ```
 
 ### Delete from Keychain
 
 ```bash
-kc delete 'myproject'
+kc delete env:myproject
+kc delete ssh:id_rsa
+kc delete token:github
 ```
 
 ### Use with direnv
@@ -54,44 +87,87 @@ In your `.envrc`:
 
 ```bash
 # Load from keychain and export all variables
-eval "$(kc load myproject | sed 's/^/export /')"
+eval "$(kc load env:myproject | sed 's/^/export /')"
 
 # Or restore .env file
-kc load myproject > .env
+kc load env:myproject > .env
 source_env .env
 ```
 
 ## Commands
 
-- `kc save <name>` - Read from stdin and save to keychain
-- `kc load <name>` - Load from keychain and output to stdout  
-- `kc delete <name>` - Delete entry from keychain
+- `kc save <namespace>:<name>` - Read from stdin and save to keychain
+- `kc load <namespace>:<name>` - Load from keychain and output to stdout  
+- `kc delete <namespace>:<name>` - Delete entry from keychain
+- `kc list [prefix]` - List all entries (optionally filter by prefix)
+
+## Namespaces
+
+Namespaces must contain only lowercase letters, numbers, and hyphens.
+
+**Common namespaces:**
+- `env:` - Environment variable files
+- `ssh:` - SSH keys
+- `token:` - API tokens
+- `cert:` - Certificates
+- `key:` - Encryption keys
+- `secret:` - General secrets
+
+You can create custom namespaces as needed.
 
 ## How it works
 
 `kc` uses macOS Security framework via FFI to directly interact with the Keychain, avoiding shell command overhead. All entries are stored under:
 
 - Service name: `kc`
-- Account name: `<your-project-name>`
+- Account name: `<namespace>:<name>` (e.g., `env:myproject`)
 
-## Examples
+## Full Workflow Example
 
 ```bash
-# Save your .env
-kc save 'myapp' < .env
+# Save environment variables for different environments
+kc save env:development < .env.development
+kc save env:staging < .env.staging
+kc save env:production < .env.production
 
-# Load it back
-kc load 'myapp' > .env
+# Save SSH keys
+kc save ssh:personal < ~/.ssh/id_rsa
+kc save ssh:work < ~/.ssh/id_rsa_work
 
-# Use in a script
-if kc load 'myapp' > /dev/null 2>&1; then
-  kc load 'myapp' > .env
+# Save API tokens
+echo "ghp_xxxxxxxxxxxx" | kc save token:github
+echo "sk-xxxxxxxxxxxxxx" | kc save token:openai
+
+# List all secrets
+kc list
+# => env:development
+# => env:production
+# => env:staging
+# => ssh:personal
+# => ssh:work
+# => token:github
+# => token:openai
+
+# List only environment files
+kc list env:
+# => env:development
+# => env:production
+# => env:staging
+
+# Load and use in direnv
+# .envrc file:
+eval "$(kc load env:development | sed 's/^/export /')"
+
+# Or check if exists before loading
+if kc list env:production > /dev/null 2>&1; then
+  kc load env:production > .env
 else
-  echo "No saved env found"
+  echo "No production env found"
 fi
 
-# Delete when done
-kc delete 'myapp'
+# Clean up when done
+kc delete env:development
+kc delete ssh:personal
 ```
 
 ## Development

@@ -55,6 +55,69 @@ module Kc
 
       # void SecKeychainItemFreeContent(SecKeychainAttributeList *attrList, void *data)
       attach_function :SecKeychainItemFreeContent, [:pointer, :pointer], :int
+
+      # Constants for attribute tags
+      KSecAccountItemAttr = 0x61636374  # 'acct' in FourCC
+
+      # Attribute structure
+      class SecKeychainAttribute < FFI::Struct
+        layout :tag, :uint32,
+               :length, :uint32,
+               :data, :pointer
+      end
+
+      class SecKeychainAttributeList < FFI::Struct
+        layout :count, :uint32,
+               :attr, :pointer  # Array of SecKeychainAttribute
+      end
+
+      # OSStatus SecKeychainSearchCreateFromAttributes(
+      #   CFTypeRef keychainOrArray,
+      #   SecItemClass itemClass,
+      #   const SecKeychainAttributeList *attrList,
+      #   SecKeychainSearchRef *searchRef
+      # )
+      attach_function :SecKeychainSearchCreateFromAttributes, [
+        :pointer,  # keychainOrArray
+        :uint32,   # itemClass (kSecGenericPasswordItemClass = 'genp')
+        :pointer,  # attrList
+        :pointer   # searchRef (output)
+      ], :int
+
+      # OSStatus SecKeychainSearchCopyNext(
+      #   SecKeychainSearchRef searchRef,
+      #   SecKeychainItemRef *itemRef
+      # )
+      attach_function :SecKeychainSearchCopyNext, [
+        :pointer,  # searchRef
+        :pointer   # itemRef (output)
+      ], :int
+
+      # OSStatus SecKeychainItemCopyAttributesAndData(
+      #   SecKeychainItemRef itemRef,
+      #   SecKeychainAttributeInfo *info,
+      #   SecItemClass *itemClass,
+      #   SecKeychainAttributeList **attrList,
+      #   UInt32 *length,
+      #   void **outData
+      # )
+      attach_function :SecKeychainItemCopyAttributesAndData, [
+        :pointer,  # itemRef
+        :pointer,  # info (NULL for default keychain)
+        :pointer,  # itemClass (can be NULL)
+        :pointer,  # attrList (output)
+        :pointer,  # length (can be NULL)
+        :pointer   # outData (can be NULL)
+      ], :int
+
+      # OSStatus SecKeychainItemFreeAttributesAndData(
+      #   SecKeychainAttributeList *attrList,
+      #   void *data
+      # )
+      attach_function :SecKeychainItemFreeAttributesAndData, [:pointer, :pointer], :int
+
+      # void CFRelease(CFTypeRef cf)
+      attach_function :CFRelease, [:pointer], :void
     end
 
     class << self
@@ -132,6 +195,33 @@ module Kc
         unless delete_status.zero?
           raise Error, "Failed to delete from keychain (status: #{delete_status})"
         end
+      end
+
+      def list(prefix = nil)
+        accounts = []
+        
+        # Use security dump-keychain and parse output
+        # We need to look for entries with service="kc"
+        output = `security dump-keychain login.keychain-db 2>/dev/null`
+        
+        # Split by keychain entries
+        entries = output.split(/^keychain:/).drop(1)
+        
+        entries.each do |entry|
+          # Check if this entry has svce="kc"
+          if entry =~ /"svce"<blob>="#{SERVICE_NAME}"/
+            # Extract account name
+            if entry =~ /"acct"<blob>="([^"]+)"/
+              account_name = $1
+              # Filter by prefix if provided
+              if prefix.nil? || account_name.start_with?(prefix)
+                accounts << account_name
+              end
+            end
+          end
+        end
+
+        accounts.sort.uniq
       end
     end
   end
