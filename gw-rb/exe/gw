@@ -1,0 +1,5 @@
+#!/usr/bin/env ruby
+
+require 'gw'
+
+Gw::CLI.start(ARGV)
