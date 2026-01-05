@@ -1,15 +1,16 @@
-# kc - Keychain Manager
+# kc - Secure Secrets Manager with iCloud Sync
 
-A CLI tool to securely store and retrieve secrets from macOS Keychain with namespace support and automatic iCloud sync.
+A CLI tool to securely store and retrieve secrets with automatic iCloud Drive synchronization across all your Macs.
 
 ## Features
 
-- 🔐 Securely store any secrets in macOS Keychain
-- ☁️ **iCloud Keychain sync** - automatically sync secrets across all your Macs
+- 🔐 **AES-256 encryption** - military-grade encryption for your secrets
+- ☁️ **iCloud Drive sync** - automatically sync encrypted secrets across all your Macs
+- 🔑 **Master password in local keychain** - password stored securely, never synced
 - 🏷️ **Namespace support** - organize secrets by type (env, ssh, token, etc.)
-- 🚀 Native implementation using FFI (no shell command overhead)
-- 📦 Simple CLI interface
-- 📋 List and filter secrets by namespace
+- 📝 **Append-only log** - automatic conflict resolution for concurrent edits
+- 🚀 **Simple CLI interface** - easy to use command-line tool
+- 📋 **Filter and search** - list secrets by namespace prefix
 
 ## Installation
 
@@ -23,11 +24,31 @@ Or add to your Gemfile:
 gem 'kc'
 ```
 
+## Quick Start
+
+### First Time Setup
+
+Initialize kc with a master password:
+
+```bash
+$ kc init
+Enter master password: ****
+Confirm master password: ****
+
+✓ Master password saved to local keychain
+✓ iCloud Drive sync enabled at:
+  ~/Library/Mobile Documents/com~apple~CloudDocs/kc
+
+Your secrets will be encrypted and synced across your Macs!
+```
+
+**Important**: You'll need to run `kc init` on each Mac with the same master password.
+
 ## Usage
 
-All commands require a **namespace** in the format `<namespace>:<name>`. Namespaces help organize different types of secrets.
+All commands use the format `<namespace>:<name>`. Namespaces help organize different types of secrets.
 
-### Save to Keychain
+### Save Secrets
 
 Read from stdin and save to keychain with namespace:
 
@@ -96,10 +117,11 @@ source_env .env
 
 ## Commands
 
-- `kc save <namespace>:<name>` - Read from stdin and save to keychain
-- `kc load <namespace>:<name>` - Load from keychain and output to stdout  
-- `kc delete <namespace>:<name>` - Delete entry from keychain
-- `kc list [prefix]` - List all entries (optionally filter by prefix)
+- `kc init` - Initialize with master password (first time setup)
+- `kc save <namespace>:<name>` - Read from stdin and save encrypted
+- `kc load <namespace>:<name>` - Decrypt and output to stdout  
+- `kc delete <namespace>:<name>` - Mark entry as deleted
+- `kc list [prefix]` - List all current entries (optionally filter by prefix)
 
 ## Namespaces
 
@@ -117,24 +139,48 @@ You can create custom namespaces as needed.
 
 ## How it works
 
-`kc` uses macOS Security framework via FFI to directly interact with the Keychain, avoiding shell command overhead. All entries are stored as **Internet Passwords** with:
+### Architecture
 
-- Server: `kc`
-- Account: `<namespace>:<name>` (e.g., `env:myproject`)
-- Protocol: HTTPS
+`kc` uses a hybrid approach combining local keychain security with iCloud Drive synchronization:
 
-### iCloud Keychain Sync
+1. **Master Password**: Stored securely in your local macOS Keychain (never synced)
+2. **Encrypted Secrets**: Stored in `~/Library/Mobile Documents/com~apple~CloudDocs/kc/secrets.jsonl`
+3. **Encryption**: AES-256-CBC with PBKDF2 key derivation (10,000 iterations)
+4. **Sync**: iCloud Drive automatically syncs the encrypted file across your Macs
 
-All secrets saved by `kc` are automatically synchronized across your Macs via **iCloud Keychain** (if enabled in System Settings). This means:
+### Data Format
 
-- 💾 Save a secret on one Mac → Access it instantly on all your other Macs
-- 🔄 Changes and deletions are synced automatically
-- 🔐 End-to-end encryption ensures your secrets remain secure during sync
-- 🌐 No manual export/import needed
+Secrets are stored in an append-only JSONL (JSON Lines) file:
 
-To verify sync is working, open **Keychain Access.app** and select the **iCloud** keychain. Look for entries with server name `kc`.
+```json
+{"ts":"2026-01-05T10:00:00.123Z","op":"set","ns":"aws","key":"ACCESS_KEY","val":"<encrypted>"}
+{"ts":"2026-01-05T11:30:00.456Z","op":"set","ns":"hubot","key":"TOKEN","val":"<encrypted>"}
+{"ts":"2026-01-05T12:00:00.789Z","op":"del","ns":"aws","key":"OLD_KEY"}
+```
 
-**Note:** Internet Passwords (used by `kc`) are automatically synced by macOS when iCloud Keychain is enabled. You don't need to do anything special!
+- **Append-only**: New entries are always appended, never modified
+- **Timestamps**: ISO8601 format with millisecond precision
+- **Operations**: `set` (save/update) or `del` (delete)
+- **Conflict Resolution**: Automatic merge based on timestamps
+
+### Security
+
+- ✅ **Master password** stored in local keychain (not synced)
+- ✅ **AES-256 encryption** for all secret values
+- ✅ **Unique salt and IV** for each encrypted value
+- ✅ **PBKDF2 key derivation** with 10,000 iterations
+- ✅ **End-to-end encryption** - iCloud only sees encrypted data
+- ❌ **Metadata not encrypted** - namespace and key names are visible (but not values)
+
+### Conflict Resolution
+
+If you edit secrets on multiple Macs simultaneously:
+
+1. iCloud Drive creates "conflicted copy" files
+2. `kc` automatically detects and merges them
+3. Entries are sorted by timestamp (oldest first)
+4. Latest value for each key wins
+5. Conflicted copies are deleted after merge
 
 ## Full Workflow Example
 
@@ -195,8 +241,11 @@ bundle exec rspec
 
 ## Requirements
 
-- macOS (uses macOS Keychain)
-- Ruby 2.5 or later
+- **macOS** - uses macOS Keychain for master password storage
+- **iCloud Drive** - enabled in System Settings for sync
+- **Ruby 2.5 or later**
+
+**Note**: Each Mac needs to run `kc init` with the same master password to decrypt synced secrets.
 
 ## Contributing
 

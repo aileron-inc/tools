@@ -8,8 +8,8 @@ Gem::Specification.new do |spec|
   spec.authors       = ['AILERON']
   spec.email         = ['masa@aileron.cc']
 
-  spec.summary       = 'Manage secrets in macOS Keychain with iCloud sync and namespace support'
-  spec.description   = 'A CLI tool to securely store and retrieve secrets from macOS Keychain with automatic iCloud sync across your Macs. Features namespace support for organizing different types of secrets (env files, SSH keys, API tokens, etc.) and works seamlessly with direnv.'
+  spec.summary       = 'Secure secrets manager with iCloud Drive sync and AES-256 encryption'
+  spec.description   = 'A CLI tool to securely store and retrieve secrets with AES-256 encryption and automatic iCloud Drive synchronization. Master password stored in local keychain, secrets encrypted and synced via iCloud Drive. Features namespace support, automatic conflict resolution, and append-only JSONL format.'
   spec.homepage      = 'https://github.com/aileron/kc'
   spec.license       = 'MIT'
 

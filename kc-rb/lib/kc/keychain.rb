@@ -1,309 +1,352 @@
 require 'ffi'
+require 'json'
+require 'openssl'
+require 'base64'
+require 'fileutils'
+require 'time'
 
 module Kc
   class Keychain
-    SERVICE_NAME = 'kc'
-
-    module CoreFoundation
-      extend FFI::Library
-      ffi_lib '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'
-
-      # CFString functions
-      attach_function :CFStringCreateWithCString, %i[pointer string uint32], :pointer
-      attach_function :CFStringGetCString, %i[pointer pointer long uint32], :bool
-      attach_function :CFStringGetLength, [:pointer], :long
-
-      # CFData functions
-      attach_function :CFDataCreate, %i[pointer pointer long], :pointer
-      attach_function :CFDataGetLength, [:pointer], :long
-      attach_function :CFDataGetBytePtr, [:pointer], :pointer
-
-      # CFDictionary functions
-      attach_function :CFDictionaryCreateMutable, %i[pointer long pointer pointer], :pointer
-      attach_function :CFDictionarySetValue, %i[pointer pointer pointer], :void
-      attach_function :CFDictionaryGetValue, %i[pointer pointer], :pointer
-
-      # CFArray functions
-      attach_function :CFArrayGetCount, [:pointer], :long
-      attach_function :CFArrayGetValueAtIndex, %i[pointer long], :pointer
-
-      # CFNumber functions
-      attach_function :CFNumberCreate, %i[pointer int pointer], :pointer
-      attach_function :CFBooleanGetValue, [:pointer], :bool
-
-      # CFRelease
-      attach_function :CFRelease, [:pointer], :void
-
-      # Constants
-      KCFStringEncodingUTF8 = 0x08000100
-      KCFNumberSInt32Type = 3
-
-      # Get Boolean constants using symbols
-      def self.kCFBooleanTrue
-        @kCFBooleanTrue ||= begin
-          ptr_ptr = FFI::DynamicLibrary.open(
-            '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',
-            FFI::DynamicLibrary::RTLD_LAZY | FFI::DynamicLibrary::RTLD_GLOBAL
-          ).find_symbol('kCFBooleanTrue')
-          FFI::Pointer.new(:pointer, ptr_ptr.address).read_pointer
-        end
-      end
-
-      def self.kCFBooleanFalse
-        @kCFBooleanFalse ||= begin
-          ptr_ptr = FFI::DynamicLibrary.open(
-            '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',
-            FFI::DynamicLibrary::RTLD_LAZY | FFI::DynamicLibrary::RTLD_GLOBAL
-          ).find_symbol('kCFBooleanFalse')
-          FFI::Pointer.new(:pointer, ptr_ptr.address).read_pointer
-        end
-      end
-    end
+    MASTER_PASSWORD_SERVICE = 'kc-master-password'
+    MASTER_PASSWORD_ACCOUNT = 'default'
+    ICLOUD_DRIVE_PATH = File.expand_path('~/Library/Mobile Documents/com~apple~CloudDocs/kc')
+    SECRETS_FILE = File.join(ICLOUD_DRIVE_PATH, 'secrets.jsonl')
 
     module SecurityFramework
       extend FFI::Library
       ffi_lib '/System/Library/Frameworks/Security.framework/Security'
 
-      # Modern SecItem API
-      attach_function :SecItemAdd, %i[pointer pointer], :int
-      attach_function :SecItemCopyMatching, %i[pointer pointer], :int
-      attach_function :SecItemUpdate, %i[pointer pointer], :int
-      attach_function :SecItemDelete, [:pointer], :int
+      # OSStatus SecKeychainAddGenericPassword(...)
+      attach_function :SecKeychainAddGenericPassword, %i[
+        pointer uint32 string uint32 string
+        uint32 pointer pointer
+      ], :int
 
-      # Error codes
+      # OSStatus SecKeychainFindGenericPassword(...)
+      attach_function :SecKeychainFindGenericPassword, %i[
+        pointer uint32 string uint32 string
+        pointer pointer pointer
+      ], :int
+
+      # OSStatus SecKeychainItemDelete(...)
+      attach_function :SecKeychainItemDelete, [:pointer], :int
+
+      # void SecKeychainItemFreeContent(...)
+      attach_function :SecKeychainItemFreeContent, %i[pointer pointer], :int
+
       ErrSecSuccess = 0
       ErrSecItemNotFound = -25_300
-      ErrSecDuplicateItem = -25_299
-
-      # Helper to get constant addresses from library
-      def self.get_constant(name)
-        ptr = FFI::DynamicLibrary.open(
-          '/System/Library/Frameworks/Security.framework/Security',
-          FFI::DynamicLibrary::RTLD_LAZY | FFI::DynamicLibrary::RTLD_GLOBAL
-        ).find_variable(name)
-        ptr.read_pointer
-      end
     end
 
     class << self
-      # Helper methods for CoreFoundation
-      def create_cf_string(str)
-        CoreFoundation.CFStringCreateWithCString(nil, str, CoreFoundation::KCFStringEncodingUTF8)
-      end
-
-      def create_cf_data(data)
-        ptr = FFI::MemoryPointer.from_string(data)
-        CoreFoundation.CFDataCreate(nil, ptr, data.bytesize)
-      end
-
-      def create_cf_boolean(value)
-        value ? CoreFoundation.kCFBooleanTrue : CoreFoundation.kCFBooleanFalse
-      end
-
-      def cf_string_to_ruby(cf_string)
-        return nil if cf_string.null?
-
-        length = CoreFoundation.CFStringGetLength(cf_string)
-        buffer = FFI::MemoryPointer.new(:char, length * 4 + 1)
-        if CoreFoundation.CFStringGetCString(cf_string, buffer, buffer.size, CoreFoundation::KCFStringEncodingUTF8)
-          buffer.read_string
+      # Initialize master password
+      def init(password)
+        # Delete existing if any
+        begin
+          delete_master_password
+        rescue StandardError
+          nil
         end
-      end
 
-      def cf_data_to_ruby(cf_data)
-        return nil if cf_data.null?
-
-        length = CoreFoundation.CFDataGetLength(cf_data)
-        ptr = CoreFoundation.CFDataGetBytePtr(cf_data)
-        ptr.read_bytes(length)
-      end
-
-      # Get Security framework constants
-      def kSecClass
-        @kSecClass ||= SecurityFramework.get_constant('kSecClass')
-      end
-
-      def kSecClassInternetPassword
-        @kSecClassInternetPassword ||= SecurityFramework.get_constant('kSecClassInternetPassword')
-      end
-
-      def kSecAttrServer
-        @kSecAttrServer ||= SecurityFramework.get_constant('kSecAttrServer')
-      end
-
-      def kSecAttrAccount
-        @kSecAttrAccount ||= SecurityFramework.get_constant('kSecAttrAccount')
-      end
-
-      def kSecAttrProtocol
-        @kSecAttrProtocol ||= SecurityFramework.get_constant('kSecAttrProtocol')
-      end
-
-      def kSecAttrProtocolHTTPS
-        @kSecAttrProtocolHTTPS ||= SecurityFramework.get_constant('kSecAttrProtocolHTTPS')
-      end
-
-      def kSecValueData
-        @kSecValueData ||= SecurityFramework.get_constant('kSecValueData')
-      end
-
-      def kSecReturnData
-        @kSecReturnData ||= SecurityFramework.get_constant('kSecReturnData')
-      end
-
-      def kSecMatchLimit
-        @kSecMatchLimit ||= SecurityFramework.get_constant('kSecMatchLimit')
-      end
-
-      def kSecMatchLimitAll
-        @kSecMatchLimitAll ||= SecurityFramework.get_constant('kSecMatchLimitAll')
-      end
-
-      def kSecReturnAttributes
-        @kSecReturnAttributes ||= SecurityFramework.get_constant('kSecReturnAttributes')
-      end
-
-      def save(account_name, content)
-        # Try to delete existing entry first (update semantics)
-        delete(account_name) rescue nil
-
-        # Create query dictionary for Internet Password
-        # Note: Internet Passwords are automatically synced via iCloud Keychain when enabled
-        query = CoreFoundation.CFDictionaryCreateMutable(nil, 0, nil, nil)
-
-        server_str = create_cf_string(SERVICE_NAME)
-        account_str = create_cf_string(account_name)
-        data_obj = create_cf_data(content)
-
-        CoreFoundation.CFDictionarySetValue(query, kSecClass, kSecClassInternetPassword)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrServer, server_str)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrAccount, account_str)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrProtocol, kSecAttrProtocolHTTPS)
-        CoreFoundation.CFDictionarySetValue(query, kSecValueData, data_obj)
-
-        status = SecurityFramework.SecItemAdd(query, nil)
-
-        # Cleanup
-        CoreFoundation.CFRelease(server_str)
-        CoreFoundation.CFRelease(account_str)
-        CoreFoundation.CFRelease(data_obj)
-        CoreFoundation.CFRelease(query)
+        # Save new master password to local keychain
+        status = SecurityFramework.SecKeychainAddGenericPassword(
+          nil,
+          MASTER_PASSWORD_SERVICE.bytesize,
+          MASTER_PASSWORD_SERVICE,
+          MASTER_PASSWORD_ACCOUNT.bytesize,
+          MASTER_PASSWORD_ACCOUNT,
+          password.bytesize,
+          FFI::MemoryPointer.from_string(password),
+          nil
+        )
 
         unless status == SecurityFramework::ErrSecSuccess
-          raise Error, "Failed to save to keychain (status: #{status})"
-        end
-      end
-
-      def load(account_name)
-        # Create query dictionary for Internet Password
-        query = CoreFoundation.CFDictionaryCreateMutable(nil, 0, nil, nil)
-
-        server_str = create_cf_string(SERVICE_NAME)
-        account_str = create_cf_string(account_name)
-
-        CoreFoundation.CFDictionarySetValue(query, kSecClass, kSecClassInternetPassword)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrServer, server_str)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrAccount, account_str)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrProtocol, kSecAttrProtocolHTTPS)
-        CoreFoundation.CFDictionarySetValue(query, kSecReturnData, create_cf_boolean(true))
-
-        result_ptr = FFI::MemoryPointer.new(:pointer)
-        status = SecurityFramework.SecItemCopyMatching(query, result_ptr)
-
-        # Cleanup query
-        CoreFoundation.CFRelease(server_str)
-        CoreFoundation.CFRelease(account_str)
-        CoreFoundation.CFRelease(query)
-
-        unless status == SecurityFramework::ErrSecSuccess
-          if status == SecurityFramework::ErrSecItemNotFound
-            raise Error, "Entry '#{account_name}' not found in keychain"
-          else
-            raise Error, "Failed to load from keychain (status: #{status})"
-          end
+          raise Error, "Failed to save master password (status: #{status})"
         end
 
-        # Extract data
-        result = result_ptr.read_pointer
-        data = cf_data_to_ruby(result)
-        CoreFoundation.CFRelease(result)
+        # Ensure iCloud Drive directory exists
+        FileUtils.mkdir_p(ICLOUD_DRIVE_PATH)
 
-        data
+        # Create empty secrets file if it doesn't exist
+        File.write(SECRETS_FILE, '') unless File.exist?(SECRETS_FILE)
       end
 
-      def delete(account_name)
-        # Create query dictionary for Internet Password
-        query = CoreFoundation.CFDictionaryCreateMutable(nil, 0, nil, nil)
+      # Get master password from local keychain
+      def master_password
+        password_length = FFI::MemoryPointer.new(:uint32)
+        password_data = FFI::MemoryPointer.new(:pointer)
 
-        server_str = create_cf_string(SERVICE_NAME)
-        account_str = create_cf_string(account_name)
-
-        CoreFoundation.CFDictionarySetValue(query, kSecClass, kSecClassInternetPassword)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrServer, server_str)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrAccount, account_str)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrProtocol, kSecAttrProtocolHTTPS)
-
-        status = SecurityFramework.SecItemDelete(query)
-
-        # Cleanup
-        CoreFoundation.CFRelease(server_str)
-        CoreFoundation.CFRelease(account_str)
-        CoreFoundation.CFRelease(query)
-
-        unless status == SecurityFramework::ErrSecSuccess
-          if status == SecurityFramework::ErrSecItemNotFound
-            raise Error, "Entry '#{account_name}' not found in keychain"
-          else
-            raise Error, "Failed to delete from keychain (status: #{status})"
-          end
-        end
-      end
-
-      def list(prefix = nil)
-        # Create query dictionary for Internet Password
-        query = CoreFoundation.CFDictionaryCreateMutable(nil, 0, nil, nil)
-
-        server_str = create_cf_string(SERVICE_NAME)
-
-        CoreFoundation.CFDictionarySetValue(query, kSecClass, kSecClassInternetPassword)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrServer, server_str)
-        CoreFoundation.CFDictionarySetValue(query, kSecAttrProtocol, kSecAttrProtocolHTTPS)
-        CoreFoundation.CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitAll)
-        CoreFoundation.CFDictionarySetValue(query, kSecReturnAttributes, create_cf_boolean(true))
-
-        result_ptr = FFI::MemoryPointer.new(:pointer)
-        status = SecurityFramework.SecItemCopyMatching(query, result_ptr)
-
-        # Cleanup query
-        CoreFoundation.CFRelease(server_str)
-        CoreFoundation.CFRelease(query)
+        status = SecurityFramework.SecKeychainFindGenericPassword(
+          nil,
+          MASTER_PASSWORD_SERVICE.bytesize,
+          MASTER_PASSWORD_SERVICE,
+          MASTER_PASSWORD_ACCOUNT.bytesize,
+          MASTER_PASSWORD_ACCOUNT,
+          password_length,
+          password_data,
+          nil
+        )
 
         if status == SecurityFramework::ErrSecItemNotFound
-          return []
+          raise Error, "Master password not found. Please run 'kc init' first."
         end
 
         unless status == SecurityFramework::ErrSecSuccess
-          raise Error, "Failed to list keychain items (status: #{status})"
+          raise Error, "Failed to load master password (status: #{status})"
         end
 
-        # Parse results
-        result = result_ptr.read_pointer
-        count = CoreFoundation.CFArrayGetCount(result)
-        accounts = []
+        length = password_length.read_uint32
+        data_ptr = password_data.read_pointer
+        password = data_ptr.read_string(length)
 
-        count.times do |i|
-          item = CoreFoundation.CFArrayGetValueAtIndex(result, i)
-          account_cf = CoreFoundation.CFDictionaryGetValue(item, kSecAttrAccount)
-          account_name = cf_string_to_ruby(account_cf)
+        SecurityFramework.SecKeychainItemFreeContent(nil, data_ptr)
 
-          if account_name && (prefix.nil? || account_name.start_with?(prefix))
-            accounts << account_name
+        password
+      end
+
+      # Delete master password
+      def delete_master_password
+        item_ref = FFI::MemoryPointer.new(:pointer)
+
+        status = SecurityFramework.SecKeychainFindGenericPassword(
+          nil,
+          MASTER_PASSWORD_SERVICE.bytesize,
+          MASTER_PASSWORD_SERVICE,
+          MASTER_PASSWORD_ACCOUNT.bytesize,
+          MASTER_PASSWORD_ACCOUNT,
+          nil,
+          nil,
+          item_ref
+        )
+
+        return if status == SecurityFramework::ErrSecItemNotFound
+
+        unless status == SecurityFramework::ErrSecSuccess
+          raise Error, "Failed to find master password (status: #{status})"
+        end
+
+        delete_status = SecurityFramework.SecKeychainItemDelete(item_ref.read_pointer)
+        return if delete_status == SecurityFramework::ErrSecSuccess
+
+        raise Error, "Failed to delete master password (status: #{delete_status})"
+      end
+
+      # Encrypt data with master password
+      def encrypt(data)
+        password = master_password
+        cipher = OpenSSL::Cipher.new('AES-256-CBC')
+        cipher.encrypt
+
+        # Derive key from password
+        salt = OpenSSL::Random.random_bytes(16)
+        key = OpenSSL::PKCS5.pbkdf2_hmac(password, salt, 10_000, cipher.key_len, 'sha256')
+        cipher.key = key
+
+        iv = cipher.random_iv
+        encrypted = cipher.update(data) + cipher.final
+
+        # Return: salt + iv + encrypted_data (all base64 encoded)
+        result = {
+          salt: Base64.strict_encode64(salt),
+          iv: Base64.strict_encode64(iv),
+          data: Base64.strict_encode64(encrypted)
+        }
+        Base64.strict_encode64(result.to_json)
+      end
+
+      # Decrypt data with master password
+      def decrypt(encrypted_str)
+        password = master_password
+
+        # Decode outer base64
+        payload = JSON.parse(Base64.strict_decode64(encrypted_str))
+
+        salt = Base64.strict_decode64(payload['salt'])
+        iv = Base64.strict_decode64(payload['iv'])
+        encrypted_data = Base64.strict_decode64(payload['data'])
+
+        cipher = OpenSSL::Cipher.new('AES-256-CBC')
+        cipher.decrypt
+
+        key = OpenSSL::PKCS5.pbkdf2_hmac(password, salt, 10_000, cipher.key_len, 'sha256')
+        cipher.key = key
+        cipher.iv = iv
+
+        cipher.update(encrypted_data) + cipher.final
+      end
+
+      # Append entry to JSONL
+      def append_entry(namespace, key, value, operation: 'set')
+        ensure_secrets_file
+
+        entry = {
+          ts: Time.now.utc.iso8601(3),
+          op: operation,
+          ns: namespace,
+          key: key
+        }
+
+        entry[:val] = encrypt(value) if operation == 'set'
+
+        File.open(SECRETS_FILE, 'a') do |f|
+          f.puts(entry.to_json)
+        end
+      end
+
+      # Detect and merge conflicted copies
+      def detect_and_merge_conflicts
+        return unless File.exist?(SECRETS_FILE)
+
+        dir = File.dirname(SECRETS_FILE)
+        base = File.basename(SECRETS_FILE, '.jsonl')
+
+        # Find all conflicted copies
+        conflicted = Dir.glob(File.join(dir, "#{base} (*conflicted copy*).jsonl"))
+        return if conflicted.empty?
+
+        # Read all files
+        all_entries = []
+
+        # Main file
+        if File.exist?(SECRETS_FILE)
+          File.readlines(SECRETS_FILE).each do |line|
+            line = line.strip
+            next if line.empty?
+
+            begin
+              all_entries << JSON.parse(line, symbolize_names: true)
+            rescue JSON::ParserError
+              # Skip malformed lines
+            end
           end
         end
 
-        CoreFoundation.CFRelease(result)
+        # Conflicted files
+        conflicted.each do |file|
+          File.readlines(file).each do |line|
+            line = line.strip
+            next if line.empty?
 
-        accounts.sort.uniq
+            begin
+              all_entries << JSON.parse(line, symbolize_names: true)
+            rescue JSON::ParserError
+              # Skip malformed lines
+            end
+          end
+        end
+
+        # Sort by timestamp (oldest first)
+        all_entries.sort_by! { |e| e[:ts] }
+
+        # Write merged entries back to main file
+        File.open(SECRETS_FILE, 'w') do |f|
+          all_entries.each { |e| f.puts(e.to_json) }
+        end
+
+        # Delete conflicted copies
+        conflicted.each { |file| File.delete(file) }
+      end
+
+      # Read all entries from JSONL
+      def read_entries
+        # First, detect and merge any conflicts
+        detect_and_merge_conflicts
+
+        return [] unless File.exist?(SECRETS_FILE)
+
+        entries = []
+        File.readlines(SECRETS_FILE).each do |line|
+          line = line.strip
+          next if line.empty?
+
+          begin
+            entries << JSON.parse(line, symbolize_names: true)
+          rescue JSON::ParserError
+            # Skip malformed lines
+          end
+        end
+
+        entries
+      end
+
+      # Get current state (latest values for each key)
+      def current_state
+        entries = read_entries
+        state = {}
+
+        entries.each do |entry|
+          ns_key = "#{entry[:ns]}:#{entry[:key]}"
+
+          if entry[:op] == 'set'
+            state[ns_key] = {
+              namespace: entry[:ns],
+              key: entry[:key],
+              encrypted_value: entry[:val],
+              timestamp: entry[:ts]
+            }
+          elsif entry[:op] == 'del'
+            state.delete(ns_key)
+          end
+        end
+
+        state
+      end
+
+      # Save a secret
+      def save(account_name, content)
+        namespace, key = parse_account_name(account_name)
+        append_entry(namespace, key, content, operation: 'set')
+      end
+
+      # Load a secret
+      def load(account_name)
+        namespace, key = parse_account_name(account_name)
+        state = current_state
+        ns_key = "#{namespace}:#{key}"
+
+        entry = state[ns_key]
+        raise Error, "Entry '#{account_name}' not found" unless entry
+
+        decrypt(entry[:encrypted_value])
+      end
+
+      # Delete a secret
+      def delete(account_name)
+        namespace, key = parse_account_name(account_name)
+
+        # Check if exists
+        state = current_state
+        ns_key = "#{namespace}:#{key}"
+        raise Error, "Entry '#{account_name}' not found" unless state[ns_key]
+
+        append_entry(namespace, key, nil, operation: 'del')
+      end
+
+      # List secrets
+      def list(prefix = nil)
+        state = current_state
+        keys = state.keys
+
+        keys = keys.select { |k| k.start_with?(prefix) } if prefix
+
+        keys.sort
+      end
+
+      private
+
+      def parse_account_name(account_name)
+        raise Error, 'Invalid format. Use <namespace>:<name>' unless account_name&.include?(':')
+
+        namespace, key = account_name.split(':', 2)
+
+        raise Error, 'Invalid format. Use <namespace>:<name>' if namespace.empty? || key.empty?
+
+        [namespace, key]
+      end
+
+      def ensure_secrets_file
+        FileUtils.mkdir_p(ICLOUD_DRIVE_PATH) unless Dir.exist?(ICLOUD_DRIVE_PATH)
+        File.write(SECRETS_FILE, '') unless File.exist?(SECRETS_FILE)
       end
     end
   end
