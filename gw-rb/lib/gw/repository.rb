@@ -20,8 +20,9 @@ module Gw
 
       FileUtils.mkdir_p(Config.core_dir)
 
-      # Clone as bare repository
-      clone_url = GitHub.repository(full_name).clone_url
+      # Clone as bare repository with GitHub token authentication
+      token = GitHub.token
+      clone_url = "https://#{token}@github.com/#{full_name}.git"
       success = system("git clone --bare #{clone_url} #{repo.bare_path}")
 
       raise Error, "Failed to clone repository" unless success
